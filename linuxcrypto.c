@@ -12,14 +12,14 @@
 #include <linux/device.h> // Needed to support Kernel Driver Model
 #include <linux/kernel.h> // Other macros
 #include <linux/fs.h> // Header for Linux file system support
-#include <uaccess.h> // Needed for 'copy_to_user' method
+#include <linux/uaccess.h> // Needed for 'copy_to_user' method
 #define DEVICE_NAME "cryptodev" // Name of the device
 #define DEVICE_CLASS "crypto" // Name of the class
 
 // Module infos
 MODULE_AUTHOR("Marco Cetica");
 MODULE_DESCRIPTION("Char device that encrypt/decrypt data");
-MODULE_VERSIONi("0.1");
+MODULE_VERSION("0.1");
 MODULE_LICENSE("Dual BSD/GPL");
 
 // Definition of global variables(only available into this file)
@@ -40,7 +40,7 @@ static ssize_t cryptodev_write(struct file*, const char*, size_t, loff_t*);
  * Here we can map callback functions to default syscalls. */
 static struct file_operations fo = {
 	.open = cryptodev_open,
-	.close = cryptodev_close,
+	.release = cryptodev_close,
 	.read = cryptodev_read,
 	.write = cryptodev_write,
 };
@@ -121,7 +121,7 @@ static ssize_t cryptodev_read(struct file *filep, char *buffer, size_t len, loff
 	if(bytes_to_copy - bytes_not_copied)
 		printk(KERN_INFO "Cryptodev: Sent %ld bytes to the user\n", (bytes_to_copy- bytes_not_copied));
 	else if(bytes_not_copied) {
-		printk(KERN_WARN "Cryptodev: Failed to send $ld character to userspace\n", bytes_not_copied);
+		printk(KERN_WARNING "Cryptodev: Failed to send %ld character to userspace\n", bytes_not_copied);
 		return -EFAULT;
 	}
 	size_of_msg = 0;
