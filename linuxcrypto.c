@@ -13,6 +13,7 @@
 #include <linux/kernel.h> // Other macros
 #include <linux/fs.h> // Header for Linux file system support
 #include <linux/uaccess.h> // Needed for 'copy_to_user' method
+#include <linux/slab.h> // Needed for kmalloc
 #define DEVICE_NAME "cryptodev" // Name of the device
 #define DEVICE_CLASS "crypto" // Name of the class
 
@@ -35,6 +36,24 @@ static int cryptodev_open(struct inode*, struct file*);
 static int cryptodev_close(struct inode*, struct file*);
 static ssize_t cryptodev_read(struct file*, char*, size_t, loff_t*);
 static ssize_t cryptodev_write(struct file*, const char*, size_t, loff_t*);
+// Linux Crypto API functions
+static void test_skcipher_cb(struct crypto_async_request *req, int error);
+static unsigned int test_skcipher_encdec(struct skcipher_def *sk, int enc);
+
+
+// Linux Crypto APIs structs
+struct tcrypt_result { // To handle errors
+	struct completion completion;
+	int err;
+}
+
+// Groups all other structs in one place
+struct skcipher_def {
+	struct scatterlist sg;
+	struct crypto_skcipher *tfm;
+	struct skcipher_request *req;
+	struct trypt_result result;
+}
 
 /* File operation struct
  * Here we can map callback functions to default syscalls. */
@@ -150,6 +169,157 @@ static ssize_t cryptodev_write(struct file *filep, const char *buffer, size_t le
 		return -EFAULT;
 	}
 	return bytes_to_copy;
+}
+
+// Linux Crypto API implementation
+static void test_skcipher_cb(struct crypto_async_request *req, int error) {
+	struct tcrypt_result *result = req->data;
+
+	if(error == -EINPROGRESS)
+		return;
+	result->err = error;
+	complete(&result->completion);
+	pr_info("Encryption finished successfully\n");
+}
+
+// Encryption/Decryption method
+static unsigned int test_skcipher_encdec(struct skcipher_def *sk, int enc) {
+	int rc = 0;
+	if(enc) // If selected operation is "encryption"
+		rc = crypto_skcipher_encrypt(sk->req);
+	else
+		rc = crypto_skcipher_decrypt(sk->req);
+
+	// Handle errors
+	switch(rc) {
+		case 0:
+			break;
+		case -EINPROGRESS:
+		case -EBUSY:
+			rc = wait_for_completion_interruptible(&sk->result.completion);
+			if(!rc && !sk->result.err) {
+				reinit_completion(&sk->result.completion);
+				break;
+			}
+		default:
+			pr_info("skcipher encrypt returned with %d result %d\n", rc, sk->result.err);
+			break;
+	}
+	init_completion(&sk->result.completion);
+	return rc;
+
+}
+
+// Testing encryption APIs, later i will call this function from the write method
+static int test_skcipher(void) {
+	struct skcipher_def sk;
+	struct crypto_skcipher *skcipher = NULL;
+	struct skcipher_request *req = NULL;
+	char *scratchpad = NULL;
+	char *ivdata = NULL;
+	unsigned char key[32];
+	int ret = -EFAULT;
+
+	// Select crypto algorithm
+	skcipher = crypto_alloc_skcipher("cbc-aes-aesni", 0, 0);
+	// Handle errors
+	if(IS_ERR(skcipher)) {
+		pr_info("Could not allocate skcipher handle\n");
+		return PTR_ERR(skcipher);
+	}
+
+	req = skcipher_request_alloc(skcipher, GFP_KERNEL);
+	if(!req) {
+		pr_info("Could not allocate skcipher request\n");
+		ret = -ENOMEM;
+		// Remove allocated data
+		if(skcipher)
+			crypto_free_skcipher(skcipher);
+		if(req)
+			skcipher_request_free(req);
+		if(ivdata)
+			kfree(ivdata);
+		if(scratchpad)
+			kfree(scratchpad);
+		return ret;
+	}
+
+	skcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG, test_skcipher_cb, &sk_reqsult);
+
+	// Generate a random key for AES 256 algorithm
+	get_random_bytes(&key, 32); // Generate 32 bit key
+	if(crypto_skcipher_setkey(skcipher, key, 32)) {
+		pr_info("Key could not be set\n");
+		ret = -EAGAIN;
+		// Remove allocated data
+		if(skcipher)
+			crypto_free_skcipher(skcipher);
+		if(req)
+			skcipher_request_free(req);
+		if(ivdata)
+			kfree(ivdata);
+		if(scratchpad)
+			kfree(scratchpad);
+		return ret;	
+	}
+	
+	// Generate an IV(Initialization Vector)
+	ivdata = kmalloc(16, GFP_KERNEL);
+	if(!ivdata) {
+		pr_info("Could not allocate ivdata\n");
+		// Remove allocated data
+		if(skcipher)
+			crypto_free_skcipher(skcipher);
+		if(req)
+			skcipher_request_free(req);
+		if(ivdata)
+			kfree(ivdata);
+		if(scratchpad)
+			kfree(scratchpad);
+		return ret;	
+	}
+	get_random_bytes(ivdata, 16);
+
+	// For now, suppose input buffer is just random junk
+	scratchpad = kmalloc(16, GFP_KERNEL);
+	if(!scratchpad) {
+		pr_info("Could not allocate scratchpad\n");
+		// Remove allocated data
+		if(skcipher)
+			crypto_free_skcipher(skcipher);
+		if(req)
+			skcipher_request_free(req);
+		if(ivdata)
+			kfree(ivdata);
+		if(scratchpad)
+			kfree(scratchpad);
+		return ret;
+	}
+
+	sk.tfm = skcipher;
+	sk.req = req;
+
+	// Encrypt one block of data
+	sg_init_one(&sk.sg, scratchpad, 16);
+	skcipher_request_set_crypt(req, &sk.sg, &sk.sg, 16, ivdata);
+	init_completion(&sk.result.completion);
+
+	// Finally, encrypt data
+	ret = test_skcipher_encdec(&sk, 1);
+	if(ret) {
+		// Remove allocated data
+		if(skcipher)
+			crypto_free_skcipher(skcipher);
+		if(req)
+			skcipher_request_free(req);
+		if(ivdata)
+			kfree(ivdata);
+		if(scratchpad)
+			kfree(scratchpad);
+		return ret;
+	}
+
+	pr_info("Encryption triggered successfully\n");
 }
 
 // Finally, register __init and __exit functions using macros
