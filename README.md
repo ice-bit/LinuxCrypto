@@ -1,7 +1,7 @@
 # LinuxCrypto
 
 LinuxCrypto is a _Loadable Kernel Module_(**LKM**) that encrypt/decrypt data 
-sent from userspace. It uses Linux Crypto APIs to perform AES-256 encryption/decryption.  
+sent from userspace. It uses Linux Crypto APIs to perform MD5 hashing.  
 This driver is not intended to be used on production environments, it's just a toy project.
 
 ## Building

@@ -13,7 +13,8 @@
 #include <linux/kernel.h> // Other macros
 #include <linux/fs.h> // Header for Linux file system support
 #include <linux/uaccess.h> // Needed for 'copy_to_user' method
-#include <linux/slab.h> // Needed for kmalloc
+#include <crypto/hash.h> // Needed for MD5 hashing
+#include <linux/slab.h>  // Needed for kmalloc and kfree
 #define DEVICE_NAME "cryptodev" // Name of the device
 #define DEVICE_CLASS "crypto" // Name of the class
 
@@ -36,24 +37,7 @@ static int cryptodev_open(struct inode*, struct file*);
 static int cryptodev_close(struct inode*, struct file*);
 static ssize_t cryptodev_read(struct file*, char*, size_t, loff_t*);
 static ssize_t cryptodev_write(struct file*, const char*, size_t, loff_t*);
-// Linux Crypto API functions
-static void test_skcipher_cb(struct crypto_async_request *req, int error);
-static unsigned int test_skcipher_encdec(struct skcipher_def *sk, int enc);
 
-
-// Linux Crypto APIs structs
-struct tcrypt_result { // To handle errors
-	struct completion completion;
-	int err;
-}
-
-// Groups all other structs in one place
-struct skcipher_def {
-	struct scatterlist sg;
-	struct crypto_skcipher *tfm;
-	struct skcipher_request *req;
-	struct trypt_result result;
-}
 
 /* File operation struct
  * Here we can map callback functions to default syscalls. */
@@ -158,6 +142,12 @@ static ssize_t cryptodev_write(struct file *filep, const char *buffer, size_t le
 	const size_t max_len = 256 - 14 - 1;
 	size_t bytes_to_copy = (len >= max_len) ? max_len : len; // If len is > 255, copy only first 255 bytes
 	size_t bytes_not_copied = 0;
+	// Crypto structs and variables
+	struct shash_desc *algorithm;
+	char *hashed_data = NULL; // Result of hash function
+	int err;
+	algorithm = kmalloc(sizeof(*algorithm), GFP_KERNEL);
+
 	/* copy_from_user returns 0 if successful
 	 * else it returns number of bytes not copied */
 	bytes_not_copied = copy_from_user(userspace_msg, buffer, bytes_to_copy);
@@ -165,162 +155,57 @@ static ssize_t cryptodev_write(struct file *filep, const char *buffer, size_t le
 	size_of_msg = bytes_to_copy - bytes_not_copied +1; // Add null terminator
 	printk(KERN_INFO "Cryptodev: Received %zu character from userspace\n", bytes_to_copy - bytes_not_copied);
 	if(bytes_not_copied) {
-		printk(KERN_INFO "Cryptodev: Failed to read %zu characters, returning -EFAULT\n", bytes_not_copied);
+		printk(KERN_WARNING "Cryptodev: Failed to read %zu characters, returning -EFAULT\n", bytes_not_copied);
 		return -EFAULT;
 	}
+	
+	/* Once data has been received, we can start
+	 * to setup hashing structs and variables */
+	// Define which algorithm to use
+	algorithm->tfm = crypto_alloc_shash("md5", 0, CRYPTO_ALG_ASYNC); 
+
+	/* However it's not obvious that md5 algorithm 
+	 * is available in your Kernel. So to be sure
+	 * we have to check if it is NULL. To obtain 
+	 * a full list of available crypto algorithms 
+	 * on your kernel, just cat /proc/crypto device */
+	if(algorithm->tfm == NULL) {
+		printk(KERN_ALERT "Cryptodev: MD5 crypto not found on this kerne, this is a problem\n");
+		return -EIO;
+	}
+
+	// Otherwise just init choosen algorithm...
+	err = crypto_shash_init(algorithm);
+	if(err) { // Exit gracefully
+		printk(KERN_WARNING "Failed to initialize message digest\n");
+		crypto_free_shash(algorithm->tfm);
+		kfree(algorithm);
+		return err;	
+	}
+	// ...And execute hash function
+	err = crypto_shash_update(algorithm, userspace_msg, size_of_msg);
+	if(err) { // Exit gracefully
+		printk(KERN_WARNING "Failed to execute crypto function\n");
+		crypto_free_shash(algorithm->tfm);
+		kfree(algorithm);
+		return err;	
+	}
+	err = crypto_shash_final(algorithm, hashed_data);
+	if(err) { // Exit gracefully
+		printk(KERN_WARNING "Failed to complete digest operation\n");
+		crypto_free_shash(algorithm->tfm);
+		kfree(algorithm);
+		return err;
+	}
+	// Finally, clean used memory
+	crypto_free_shash(algorithm->tfm);
+	kfree(algorithm);
+
+	printk(KERN_INFO "Cryptodev: Hashing operation completed successfully\n");
+
 	return bytes_to_copy;
 }
 
-// Linux Crypto API implementation
-static void test_skcipher_cb(struct crypto_async_request *req, int error) {
-	struct tcrypt_result *result = req->data;
-
-	if(error == -EINPROGRESS)
-		return;
-	result->err = error;
-	complete(&result->completion);
-	pr_info("Encryption finished successfully\n");
-}
-
-// Encryption/Decryption method
-static unsigned int test_skcipher_encdec(struct skcipher_def *sk, int enc) {
-	int rc = 0;
-	if(enc) // If selected operation is "encryption"
-		rc = crypto_skcipher_encrypt(sk->req);
-	else
-		rc = crypto_skcipher_decrypt(sk->req);
-
-	// Handle errors
-	switch(rc) {
-		case 0:
-			break;
-		case -EINPROGRESS:
-		case -EBUSY:
-			rc = wait_for_completion_interruptible(&sk->result.completion);
-			if(!rc && !sk->result.err) {
-				reinit_completion(&sk->result.completion);
-				break;
-			}
-		default:
-			pr_info("skcipher encrypt returned with %d result %d\n", rc, sk->result.err);
-			break;
-	}
-	init_completion(&sk->result.completion);
-	return rc;
-
-}
-
-// Testing encryption APIs, later i will call this function from the write method
-static int test_skcipher(void) {
-	struct skcipher_def sk;
-	struct crypto_skcipher *skcipher = NULL;
-	struct skcipher_request *req = NULL;
-	char *scratchpad = NULL;
-	char *ivdata = NULL;
-	unsigned char key[32];
-	int ret = -EFAULT;
-
-	// Select crypto algorithm
-	skcipher = crypto_alloc_skcipher("cbc-aes-aesni", 0, 0);
-	// Handle errors
-	if(IS_ERR(skcipher)) {
-		pr_info("Could not allocate skcipher handle\n");
-		return PTR_ERR(skcipher);
-	}
-
-	req = skcipher_request_alloc(skcipher, GFP_KERNEL);
-	if(!req) {
-		pr_info("Could not allocate skcipher request\n");
-		ret = -ENOMEM;
-		// Remove allocated data
-		if(skcipher)
-			crypto_free_skcipher(skcipher);
-		if(req)
-			skcipher_request_free(req);
-		if(ivdata)
-			kfree(ivdata);
-		if(scratchpad)
-			kfree(scratchpad);
-		return ret;
-	}
-
-	skcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG, test_skcipher_cb, &sk_reqsult);
-
-	// Generate a random key for AES 256 algorithm
-	get_random_bytes(&key, 32); // Generate 32 bit key
-	if(crypto_skcipher_setkey(skcipher, key, 32)) {
-		pr_info("Key could not be set\n");
-		ret = -EAGAIN;
-		// Remove allocated data
-		if(skcipher)
-			crypto_free_skcipher(skcipher);
-		if(req)
-			skcipher_request_free(req);
-		if(ivdata)
-			kfree(ivdata);
-		if(scratchpad)
-			kfree(scratchpad);
-		return ret;	
-	}
-	
-	// Generate an IV(Initialization Vector)
-	ivdata = kmalloc(16, GFP_KERNEL);
-	if(!ivdata) {
-		pr_info("Could not allocate ivdata\n");
-		// Remove allocated data
-		if(skcipher)
-			crypto_free_skcipher(skcipher);
-		if(req)
-			skcipher_request_free(req);
-		if(ivdata)
-			kfree(ivdata);
-		if(scratchpad)
-			kfree(scratchpad);
-		return ret;	
-	}
-	get_random_bytes(ivdata, 16);
-
-	// For now, suppose input buffer is just random junk
-	scratchpad = kmalloc(16, GFP_KERNEL);
-	if(!scratchpad) {
-		pr_info("Could not allocate scratchpad\n");
-		// Remove allocated data
-		if(skcipher)
-			crypto_free_skcipher(skcipher);
-		if(req)
-			skcipher_request_free(req);
-		if(ivdata)
-			kfree(ivdata);
-		if(scratchpad)
-			kfree(scratchpad);
-		return ret;
-	}
-
-	sk.tfm = skcipher;
-	sk.req = req;
-
-	// Encrypt one block of data
-	sg_init_one(&sk.sg, scratchpad, 16);
-	skcipher_request_set_crypt(req, &sk.sg, &sk.sg, 16, ivdata);
-	init_completion(&sk.result.completion);
-
-	// Finally, encrypt data
-	ret = test_skcipher_encdec(&sk, 1);
-	if(ret) {
-		// Remove allocated data
-		if(skcipher)
-			crypto_free_skcipher(skcipher);
-		if(req)
-			skcipher_request_free(req);
-		if(ivdata)
-			kfree(ivdata);
-		if(scratchpad)
-			kfree(scratchpad);
-		return ret;
-	}
-
-	pr_info("Encryption triggered successfully\n");
-}
 
 // Finally, register __init and __exit functions using macros
 module_init(cryptodev_init);
