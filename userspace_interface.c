@@ -40,13 +40,13 @@ int main(void) {
 		return errno;
 	}
 	// Reading from the device
-	puts("Read from the device...");
+/*	puts("Read from the device...");
 	ret = read(dev, buffer, BUFFER_LEN); // Read from the device using Linux syscall
 	if(ret < 0) { // Handle errors
 		perror("Failed to read from the device");
 		return errno;
 	}
 	// Print the result
-	printf("Received data from the kernel: %s\n", buffer);
+	printf("Received data from the kernel: %d\n", atoi(buffer));*/
 	return 0;
 }

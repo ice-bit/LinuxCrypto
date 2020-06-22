@@ -28,6 +28,7 @@ MODULE_LICENSE("Dual BSD/GPL");
 static int device_number; // Number of character device, aka major number
 static char userspace_msg[256] = {0}; // Data from userspace with fixed size
 static short size_of_msg; // Actual buffer size
+static unsigned char hashed_data[512] = {0}; // Result of hashing function
 static int open_count = 0; // Number of times device has been opened
 static struct class* cryptodev_class = NULL; // device driver class pointer
 static struct device* cryptodev_device = NULL; // device driver device pointer
@@ -120,7 +121,7 @@ static ssize_t cryptodev_read(struct file *filep, char *buffer, size_t len, loff
 		return 0;
 	/* copy_to_user method returns 0 if successful,
 	 * else it returns the number of bytes not copied */
-	bytes_not_copied = copy_to_user(buffer, userspace_msg, bytes_to_copy);
+	bytes_not_copied = copy_to_user(buffer, hashed_data, bytes_to_copy);
 	if(bytes_to_copy - bytes_not_copied)
 		printk(KERN_INFO "Cryptodev: Sent %ld bytes to the user\n", (bytes_to_copy- bytes_not_copied));
 	else if(bytes_not_copied) {
@@ -144,8 +145,8 @@ static ssize_t cryptodev_write(struct file *filep, const char *buffer, size_t le
 	size_t bytes_not_copied = 0;
 	// Crypto structs and variables
 	struct shash_desc *algorithm;
-	char *hashed_data = NULL; // Result of hash function
 	int err;
+	int i;
 	algorithm = kmalloc(sizeof(*algorithm), GFP_KERNEL);
 
 	/* copy_from_user returns 0 if successful
@@ -158,7 +159,8 @@ static ssize_t cryptodev_write(struct file *filep, const char *buffer, size_t le
 		printk(KERN_WARNING "Cryptodev: Failed to read %zu characters, returning -EFAULT\n", bytes_not_copied);
 		return -EFAULT;
 	}
-	
+
+
 	/* Once data has been received, we can start
 	 * to setup hashing structs and variables */
 	// Define which algorithm to use
@@ -202,6 +204,10 @@ static ssize_t cryptodev_write(struct file *filep, const char *buffer, size_t le
 	kfree(algorithm);
 
 	printk(KERN_INFO "Cryptodev: Hashing operation completed successfully\n");
+
+	for(i = 0; i < 16; i++) {
+		printk(KERN_INFO "%02x", hashed_data[i]);
+	}
 
 	return bytes_to_copy;
 }
