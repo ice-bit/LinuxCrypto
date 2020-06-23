@@ -32,15 +32,16 @@ you should use `dmesg` to see its output:
 sudo dmesg -Hw
 ```
 
-After that you can run(for instane on another terminal) `uint` tool to talk to the device:  
+After that you can run(for instane on another terminal) `uint` tool to hash a sample string:   
 ```
-marco@kerneldev:~/LinuxCrypto$ sudo ./uint 
+marco@devserver:~/LinuxCrypto$ sudo ./uint
 Opening character device...
-Insert a string: Greetings from user space
-Send message to device...
-Read from the device...
-Received data from the kernel: Greetings from user space
+Insert a string: Hello World
+Hashing string, please wait...
+Original: 'Hello World', MD5 digest: 'b10a8db164e0754105b7a99be72e3fe5'
 ``` 
+The final output should be the same as: `echo -n "Hello World" | md5sum`
+
 
 ## License
 [GPL](https://choosealicense.com/licenses/gpl-3.0/)

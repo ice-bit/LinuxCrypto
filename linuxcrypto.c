@@ -1,7 +1,7 @@
 /* Loadable Kernel Module(LKM) that 
  * create a character device able
- * to encrypt strings using AES256
- * encryption. This driver uses 
+ * to hash a message from userspace
+ * using MD5 algorithm. This driver uses 
  * standard Linux kernel cryptographic APIs,
  * however it's just a minimal example of 
  * driver development, so do not use it 
@@ -20,7 +20,7 @@
 
 // Module infos
 MODULE_AUTHOR("Marco Cetica");
-MODULE_DESCRIPTION("Char device that encrypt/decrypt data");
+MODULE_DESCRIPTION("Char device that computer MD5.");
 MODULE_VERSION("0.1");
 MODULE_LICENSE("Dual BSD/GPL");
 
@@ -28,7 +28,7 @@ MODULE_LICENSE("Dual BSD/GPL");
 static int device_number; // Number of character device, aka major number
 static char userspace_msg[256] = {0}; // Data from userspace with fixed size
 static short size_of_msg; // Actual buffer size
-static unsigned char hashed_data[512] = {0}; // Result of hashing function
+static char hashed_data[16] = {0}; // Result of hashing function
 static int open_count = 0; // Number of times device has been opened
 static struct class* cryptodev_class = NULL; // device driver class pointer
 static struct device* cryptodev_device = NULL; // device driver device pointer
@@ -51,15 +51,15 @@ static struct file_operations fo = {
 
 // Entry point functions: __init and __exit
 static int __init cryptodev_init(void) {
-	printk(KERN_INFO "Cryptodev: Loading, please wait...\n");
+	printk(KERN_INFO "cryptodev: Loading, please wait...\n");
 
 	// Obtain a device number for the device
 	device_number = register_chrdev(0, DEVICE_NAME, &fo);
 	if(device_number < 0) {
-		printk(KERN_ALERT "Cryptodev: Error while trying to register a major number\n");
+		printk(KERN_ALERT "cryptodev: Error while trying to register a major number\n");
 		return device_number;
 	}
-	printk(KERN_INFO "Cryptodev: New device successfully registered with major number: %d\n", device_number);
+	printk(KERN_INFO "cryptodev: New device successfully registered with major number: %d\n", device_number);
 
 	// Now we can register the device class...
 	cryptodev_class = class_create(THIS_MODULE, DEVICE_CLASS);
@@ -68,7 +68,7 @@ static int __init cryptodev_init(void) {
 		printk(KERN_ALERT "Failed to register device class\n");
 		return PTR_ERR(cryptodev_class);
 	}
-	printk(KERN_INFO "Cryptodev: device class successfully created\n");
+	printk(KERN_INFO "cryptodev: device class successfully created\n");
 
 	//...and the device driver
 	cryptodev_device = device_create(cryptodev_class, NULL, MKDEV(device_number, 0), NULL, DEVICE_NAME);
@@ -78,7 +78,7 @@ static int __init cryptodev_init(void) {
 		printk(KERN_ALERT "Failed to create a new device\n");
 		return PTR_ERR(cryptodev_device);
 	}
-	printk(KERN_INFO "Cryptodev: device class successfully created\n");
+	printk(KERN_INFO "cryptodev: device driver successfully created\n");
 	return 0;
 }
 
@@ -87,7 +87,7 @@ static void __exit cryptodev_exit(void) {
 	class_unregister(cryptodev_class); // Unregister class
 	class_destroy(cryptodev_class); // Destroy the class
 	unregister_chrdev(device_number, DEVICE_NAME); // Unregister device's major number
-	printk(KERN_INFO "Cryptodev: Module unloaded successfully\n");
+	printk(KERN_INFO "cryptodev: Module unloaded successfully\n");
 }
 
 /* This function is being called each time an userspace process
@@ -95,7 +95,7 @@ static void __exit cryptodev_exit(void) {
  * to setup, we'll just increment a counter */
 static int cryptodev_open(struct inode *inodep, struct file *filep) {
 	open_count++;
-	printk(KERN_INFO "Cryptodev: this device has been opened %d times\n", open_count);
+	printk(KERN_INFO "cryptodev: this device has been opened %d times\n", open_count);
 	return 0;
 }
 
@@ -103,7 +103,7 @@ static int cryptodev_open(struct inode *inodep, struct file *filep) {
  * release the character device 
  * Since we do not have anything to do, we just log the user about it*/
 static int cryptodev_close(struct inode *inodep, struct file *filep) {
-	printk(KERN_INFO "Cryptodev: Device successfully closed\n");
+	printk(KERN_INFO "cryptodev: Device successfully closed\n");
 	return 0;
 }
 
@@ -121,15 +121,16 @@ static ssize_t cryptodev_read(struct file *filep, char *buffer, size_t len, loff
 		return 0;
 	/* copy_to_user method returns 0 if successful,
 	 * else it returns the number of bytes not copied */
-	bytes_not_copied = copy_to_user(buffer, hashed_data, bytes_to_copy);
+	bytes_not_copied = copy_to_user(buffer, hashed_data, 16);
 	if(bytes_to_copy - bytes_not_copied)
-		printk(KERN_INFO "Cryptodev: Sent %ld bytes to the user\n", (bytes_to_copy- bytes_not_copied));
+		printk(KERN_INFO "cryptodev: Sent %ld bytes to the user\n", (bytes_to_copy- bytes_not_copied));
 	else if(bytes_not_copied) {
-		printk(KERN_WARNING "Cryptodev: Failed to send %ld character to userspace\n", bytes_not_copied);
+		printk(KERN_WARNING "cryptodev: Failed to send %ld character to userspace\n", bytes_not_copied);
 		return -EFAULT;
 	}
 	size_of_msg = 0;
-	return bytes_to_copy;
+
+	return 0;
 }
 
 
@@ -144,72 +145,67 @@ static ssize_t cryptodev_write(struct file *filep, const char *buffer, size_t le
 	size_t bytes_to_copy = (len >= max_len) ? max_len : len; // If len is > 255, copy only first 255 bytes
 	size_t bytes_not_copied = 0;
 	// Crypto structs and variables
-	struct shash_desc *algorithm;
-	int err;
-	int i;
-	algorithm = kmalloc(sizeof(*algorithm), GFP_KERNEL);
+	struct crypto_shash *algorithm;
+	struct shash_desc *desc;
 
 	/* copy_from_user returns 0 if successful
 	 * else it returns number of bytes not copied */
 	bytes_not_copied = copy_from_user(userspace_msg, buffer, bytes_to_copy);
-	sprintf(userspace_msg + bytes_to_copy - bytes_not_copied, " (%zu letters)", bytes_to_copy - bytes_not_copied);
 	size_of_msg = bytes_to_copy - bytes_not_copied +1; // Add null terminator
-	printk(KERN_INFO "Cryptodev: Received %zu character from userspace\n", bytes_to_copy - bytes_not_copied);
+	printk(KERN_INFO "cryptodev: Received %zu character from userspace\n", bytes_to_copy - bytes_not_copied);
 	if(bytes_not_copied) {
-		printk(KERN_WARNING "Cryptodev: Failed to read %zu characters, returning -EFAULT\n", bytes_not_copied);
+		printk(KERN_WARNING "cryptodev: Failed to read %zu characters, returning -EFAULT\n", bytes_not_copied);
 		return -EFAULT;
 	}
-
 
 	/* Once data has been received, we can start
 	 * to setup hashing structs and variables */
 	// Define which algorithm to use
-	algorithm->tfm = crypto_alloc_shash("md5", 0, CRYPTO_ALG_ASYNC); 
-
-	/* However it's not obvious that md5 algorithm 
-	 * is available in your Kernel. So to be sure
-	 * we have to check if it is NULL. To obtain 
-	 * a full list of available crypto algorithms 
-	 * on your kernel, just cat /proc/crypto device */
-	if(algorithm->tfm == NULL) {
-		printk(KERN_ALERT "Cryptodev: MD5 crypto not found on this kerne, this is a problem\n");
-		return -EIO;
+	algorithm = crypto_alloc_shash("md5", 0, 0);
+	
+	// Check if md5 is available
+	if(IS_ERR(algorithm)) {
+		printk(KERN_ALERT "cryptodev: MD5 crypto not found on this kernel, this is a problem\n");
+		return -EFAULT;
 	}
 
-	// Otherwise just init choosen algorithm...
-	err = crypto_shash_init(algorithm);
-	if(err) { // Exit gracefully
+	desc = kmalloc(sizeof(struct shash_desc) + crypto_shash_descsize(algorithm), GFP_KERNEL);
+	// Check kmalloc
+	if(!desc) {
+		printk(KERN_ERR "Failed to allocate heap memory\n");
+		return -ENOMEM;
+	}
+	// Assign choosen algorithm to tfm
+	desc->tfm = algorithm;
+
+	// Init choosen algorithm
+	if(crypto_shash_init(desc)) { // Exit gracefully
 		printk(KERN_WARNING "Failed to initialize message digest\n");
-		crypto_free_shash(algorithm->tfm);
+		crypto_free_shash(algorithm);
 		kfree(algorithm);
-		return err;	
+		return -EFAULT;	
 	}
-	// ...And execute hash function
-	err = crypto_shash_update(algorithm, userspace_msg, size_of_msg);
-	if(err) { // Exit gracefully
+
+	// Execute hash function
+	if(crypto_shash_update(desc, userspace_msg, strlen(userspace_msg))) { // Exit gracefully
 		printk(KERN_WARNING "Failed to execute crypto function\n");
-		crypto_free_shash(algorithm->tfm);
+		crypto_free_shash(algorithm);
 		kfree(algorithm);
-		return err;	
+		return -EFAULT;	
 	}
-	err = crypto_shash_final(algorithm, hashed_data);
-	if(err) { // Exit gracefully
+	if(crypto_shash_final(desc, hashed_data)) { // Exit gracefully
 		printk(KERN_WARNING "Failed to complete digest operation\n");
-		crypto_free_shash(algorithm->tfm);
+		crypto_free_shash(algorithm);
 		kfree(algorithm);
-		return err;
+		return -EFAULT;
 	}
 	// Finally, clean used memory
-	crypto_free_shash(algorithm->tfm);
-	kfree(algorithm);
+	crypto_free_shash(algorithm);
+	kfree(desc);
 
-	printk(KERN_INFO "Cryptodev: Hashing operation completed successfully\n");
+	printk(KERN_INFO "cryptodev: Hashing operation completed successfully\n");
 
-	for(i = 0; i < 16; i++) {
-		printk(KERN_INFO "%02x", hashed_data[i]);
-	}
-
-	return bytes_to_copy;
+	return 0;
 }
 
 
