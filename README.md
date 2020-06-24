@@ -23,7 +23,26 @@ sudo rmmod linuxcrypto
 and clean current directory using `make clean`.
 
 ### Rebuilding the kernel
-_work in progres_
+Another way to test this driver is by recompiling the whole kernel(_not recommended_):  
+1. First download kernel source from [kernel.org](http://kernel.org) and unpack it using `tar xvf linux-x.y.z.tar.xz`;  
+2. Create a new directory named `drivers/linuxcrypto` and place `linuxcrypto.c` in it;  
+3. Create a `Kconfig` file with the following:  
+    ```
+        config LINUXCRYPTO
+        tristate "MD5 Hash"
+        depends on CRYPTO_MD5
+        help
+            Hash a string using MD5
+    ```
+4. Create a `Makefile` file with `obj-$(CONFIG_LINUXCRYPTO) += linuxcrypto.o`;  
+5. Edit `drivers/Kconfig` and add `source "drivers/linuxcrypto/Kconfig"`;  
+6. Edit `drivers/Makefile` and add `obj-$(CONFIG_LINUXCRYPTO) += linuxcrypto/`;  
+7. Run `make menuconfig` and enable `drivers/linuxcrypto`;  
+8. Run `make -j#<number of cores>`;  
+9. Run `make modules_install`;  
+10. Copy kernel image by running `cp -v arch/x86_64/boot/bzImage /boot/vmlinuz-linux<xyz>`;  
+11. Generate initial ram disk(for instance, on Arch Linux: `mkinitcpio -p linux<xyz>`);  
+12. Update bootloader config file.  
 
 ## Usage
 Linux kernel module logs directly to tty, so if you have a running X environment
