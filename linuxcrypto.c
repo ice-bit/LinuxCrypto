@@ -20,7 +20,7 @@
 
 // Module infos
 MODULE_AUTHOR("Marco Cetica");
-MODULE_DESCRIPTION("Char device that computer MD5.");
+MODULE_DESCRIPTION("Char device that compute MD5.");
 MODULE_VERSION("0.1");
 MODULE_LICENSE("Dual BSD/GPL");
 
